@@ -41,12 +41,14 @@ func handleRequest(event events.APIGatewayProxyRequest) (response *events.APIGat
 		response = sc.MakeResponse(401, fmt.Sprintf("API-key authorization failed"))
 		return
 	}
-	// check API-key if valid
-	cerr = apikey.CheckAvalability(db)
-	if cerr != nil {
-		fmt.Printf("%+v", cerr)
-		response = sc.MakeResponse(401, fmt.Sprintf("API key is invalid: %s", cerr.Error()))
-		return
+	if !apikey.Demo {
+		// check API-key if valid
+		cerr = apikey.CheckAvalability(db)
+		if cerr != nil {
+			fmt.Printf("%+v", cerr)
+			response = sc.MakeResponse(401, fmt.Sprintf("API key is invalid: %s", cerr.Error()))
+			return
+		}
 	}
 	fmt.Printf("apikey checked : %d\n", time.Now().Sub(st))
 	// get parameters
@@ -80,6 +82,7 @@ func handleRequest(event events.APIGatewayProxyRequest) (response *events.APIGat
 		// if this apikey is demo key, then check if nanosec is in allowed range
 		if nanosec < int64(streamcommons.DemoAPIKeyAllowedStart) || nanosec >= int64(streamcommons.DemoAPIKeyAllowedEnd) {
 			response = sc.MakeResponse(400, "'nanosec' is out of range: You are using demo API-key")
+			return
 		}
 	}
 	var form formatter.Formatter
