@@ -29,7 +29,6 @@ func feedToSimulator(reader *bufio.Reader, targetNanosec int64, sim simulator.Si
 		}
 		scanned += len(typeBytes)
 		typeStr := *(*string)(unsafe.Pointer(&typeBytes))
-
 		// read timestamp
 		var timestampBytes []byte
 		if typeStr == "end\t" {
@@ -40,7 +39,6 @@ func feedToSimulator(reader *bufio.Reader, targetNanosec int64, sim simulator.Si
 		if err != nil {
 			return
 		}
-
 		scanned += len(timestampBytes)
 		if typeStr != "state\t" {
 			timestampStr := *(*string)(unsafe.Pointer(&timestampBytes))
@@ -59,7 +57,6 @@ func feedToSimulator(reader *bufio.Reader, targetNanosec int64, sim simulator.Si
 				return
 			}
 		}
-
 		if typeStr == "msg\t" || typeStr == "state\t" {
 			// get channel
 			var channelBytes []byte
@@ -79,10 +76,23 @@ func feedToSimulator(reader *bufio.Reader, targetNanosec int64, sim simulator.Si
 			scanned += len(line)
 			st := time.Now()
 			if typeStr == "msg\t" {
-				_, err = sim.ProcessMessage(line)
+				_, err = sim.ProcessMessageChannelKnown(channelTrimmed, line)
 			} else if typeStr == "state\t" {
 				err = sim.ProcessState(channelTrimmed, line)
 			}
+			tprocess += time.Now().Sub(st).Nanoseconds()
+			if err != nil {
+				return
+			}
+			continue
+		} else if typeStr == "start\t" {
+			url, serr := reader.ReadBytes('\n')
+			if serr != nil {
+				return serr
+			}
+			scanned += len(url)
+			st := time.Now()
+			_, err = sim.ProcessStart(url)
 			tprocess += time.Now().Sub(st).Nanoseconds()
 			if err != nil {
 				return
