@@ -9,9 +9,17 @@ import (
 	"time"
 	"unsafe"
 
-	sc "github.com/exchangedataset/streamcommons"
 	"github.com/exchangedataset/streamcommons/simulator"
 )
+
+// SnapshotParameter is the parameter for snapshot
+type SnapshotParameter struct {
+	exchange string
+	nanosec  int64
+	minute   int64
+	channels []string
+	format   string
+}
 
 func feedToSimulator(reader *bufio.Reader, targetNanosec int64, sim simulator.Simulator) (scanned int, stop bool, err error) {
 	tprocess := int64(0)
@@ -76,7 +84,7 @@ func feedToSimulator(reader *bufio.Reader, targetNanosec int64, sim simulator.Si
 			scanned += len(line)
 			st := time.Now()
 			if typeStr == "msg\t" {
-				_, err = sim.ProcessMessageChannelKnown(channelTrimmed, line)
+				err = sim.ProcessMessageChannelKnown(channelTrimmed, line)
 			} else if typeStr == "state\t" {
 				err = sim.ProcessState(channelTrimmed, line)
 			}
@@ -88,11 +96,11 @@ func feedToSimulator(reader *bufio.Reader, targetNanosec int64, sim simulator.Si
 		} else if typeStr == "start\t" {
 			url, serr := reader.ReadBytes('\n')
 			if serr != nil {
-				return serr
+				return 0, false, serr
 			}
 			scanned += len(url)
 			st := time.Now()
-			_, err = sim.ProcessStart(url)
+			err = sim.ProcessStart(url)
 			tprocess += time.Now().Sub(st).Nanoseconds()
 			if err != nil {
 				return
@@ -112,24 +120,18 @@ func feedToSimulator(reader *bufio.Reader, targetNanosec int64, sim simulator.Si
 	return
 }
 
-func downloadAndFeed(key string, targetNanosec int64, channels []string, sim simulator.Simulator) (scanned int64, stop bool, err error) {
-	st := time.Now()
-	reader, err := sc.GetS3Object(key)
-	if err != nil {
-		return
-	}
+func feed(reader io.ReadCloser, targetNanosec int64, channels []string, sim simulator.Simulator) (scanned int, stop bool, err error) {
 	defer func() {
 		serr := reader.Close()
 		if serr != nil {
 			if err != nil {
-				err = fmt.Errorf("%+v, original error was: %+v", serr, err)
+				err = fmt.Errorf("%v, original error was: %v", serr, err)
 			} else {
 				err = serr
 			}
 			return
 		}
 	}()
-	fmt.Printf("got response : %d\n", time.Now().Sub(st))
 	var greader *gzip.Reader
 	greader, err = gzip.NewReader(reader)
 	if err != nil {
@@ -140,7 +142,7 @@ func downloadAndFeed(key string, targetNanosec int64, channels []string, sim sim
 		serr := greader.Close()
 		if serr != nil {
 			if err != nil {
-				err = fmt.Errorf("%+v, original error was: %+v", serr, err)
+				err = fmt.Errorf("%v, original error was: %v", serr, err)
 			} else {
 				err = serr
 			}
@@ -148,10 +150,6 @@ func downloadAndFeed(key string, targetNanosec int64, channels []string, sim sim
 		}
 	}()
 	breader := bufio.NewReader(greader)
-
-	fmt.Printf("reader setup : %d\n", time.Now().Sub(st))
-	var datasetScanned int
-	datasetScanned, stop, err = feedToSimulator(breader, targetNanosec, sim)
-	scanned = int64(datasetScanned)
+	scanned, stop, err = feedToSimulator(breader, targetNanosec, sim)
 	return
 }

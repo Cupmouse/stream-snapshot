@@ -2,8 +2,10 @@ package main
 
 import (
 	"bytes"
-	"database/sql"
+	"context"
+	"errors"
 	"fmt"
+	"os"
 	"strconv"
 	"time"
 
@@ -16,131 +18,120 @@ import (
 	"github.com/exchangedataset/streamcommons/simulator"
 )
 
+// Production is `true` if and only if this instance is running on the context of production environment.
+var Production = os.Getenv("PRODUCTION") == "1"
+
 func handleRequest(event events.APIGatewayProxyRequest) (response *events.APIGatewayProxyResponse, err error) {
-	var db *sql.DB
-	db, err = sc.ConnectDatabase()
-	if err != nil {
+	if Production {
+		sc.AWSEnableProduction()
+	}
+
+	db, serr := sc.ConnectDatabase()
+	if serr != nil {
+		err = serr
 		return
 	}
 	defer func() {
 		serr := db.Close()
 		if serr != nil {
 			if err != nil {
-				err = fmt.Errorf("%+v, original error was: %+v", serr, err)
+				err = fmt.Errorf("%v, original error was: %v", serr, err)
 			} else {
 				err = serr
 			}
 		}
 	}()
-
 	st := time.Now()
 	// initialize apikey
-	apikey, cerr := sc.NewAPIKey(event)
-	if cerr != nil {
-		fmt.Printf("%+v", cerr)
+	apikey, serr := sc.NewAPIKey(event)
+	if serr != nil {
+		fmt.Printf("%v", serr)
 		response = sc.MakeResponse(401, fmt.Sprintf("API-key authorization failed"))
 		return
 	}
 	if !apikey.Demo {
 		// check API-key if valid
-		cerr = apikey.CheckAvalability(db)
-		if cerr != nil {
-			fmt.Printf("%+v", cerr)
-			response = sc.MakeResponse(401, fmt.Sprintf("API key is invalid: %s", cerr.Error()))
+		serr = apikey.CheckAvalability(db)
+		if serr != nil {
+			fmt.Printf("%v", serr)
+			response = sc.MakeResponse(401, fmt.Sprintf("API key is invalid: %v", serr))
 			return
 		}
 	}
 	fmt.Printf("apikey checked : %d\n", time.Now().Sub(st))
 	// get parameters
-	exchange, ok := event.PathParameters["exchange"]
-	if !ok {
-		response = sc.MakeResponse(400, "'exchange' must be specified")
+	param, serr := makeParameter(event)
+	if serr != nil {
+		response = sc.MakeResponse(400, serr.Error())
 		return
 	}
-	nanosecStr, ok := event.PathParameters["nanosec"]
-	if !ok {
-		response = sc.MakeResponse(400, "'nanosec' must be specified")
-		return
-	}
-	nanosec, cerr := strconv.ParseInt(nanosecStr, 10, 64)
-	if cerr != nil {
-		response = sc.MakeResponse(400, "'nanosec' must be of integer type")
-		return
-	}
-	minute := nanosec / 60 / 1000000000
-	channels, ok := event.MultiValueQueryStringParameters["channels"]
-	if !ok {
-		response = sc.MakeResponse(400, "'channels' must be specified")
-		return
-	}
-	format, ok := event.QueryStringParameters["format"]
-	if !ok {
-		// default format is raw
-		format = "raw"
-	}
-	if apikey.Demo {
+	if apikey.Demo && Production {
 		// if this apikey is demo key, then check if nanosec is in allowed range
-		if nanosec < int64(streamcommons.DemoAPIKeyAllowedStart) || nanosec >= int64(streamcommons.DemoAPIKeyAllowedEnd) {
+		if param.nanosec < int64(streamcommons.DemoAPIKeyAllowedStart) || param.nanosec >= int64(streamcommons.DemoAPIKeyAllowedEnd) {
 			response = sc.MakeResponse(400, "'nanosec' is out of range: You are using demo API-key")
 			return
 		}
 	}
 	var form formatter.Formatter
-	if format != "raw" {
+	if param.format != "raw" {
 		// check if it has the right formatter for this exhcange and format
-		form, cerr = formatter.GetFormatter(exchange, channels, format)
-		if cerr != nil {
-			response = sc.MakeResponse(400, cerr.Error())
+		form, serr = formatter.GetFormatter(param.exchange, param.channels, param.format)
+		if serr != nil {
+			response = sc.MakeResponse(400, serr.Error())
 			return
 		}
 	}
 	// check if it has the right simulator for this request
-	sim, cerr := simulator.GetSimulator(exchange, channels)
-	if cerr != nil {
-		response = sc.MakeResponse(400, cerr.Error())
+	sim, serr := simulator.GetSimulator(param.exchange, param.channels)
+	if serr != nil {
+		response = sc.MakeResponse(400, serr.Error())
 		return
 	}
 	fmt.Printf("setup end : %d\n", time.Now().Sub(st))
 	// list dataset to read to reconstruct snapshot
 	// and make response string
-	var rows *sql.Rows
-	rows, err = db.Query("CALL dataset_info.find_dataset_for_snapshot(?, ?)", exchange, minute)
-	if err != nil {
-		return
+	ctx := context.Background()
+	tenMinute := (param.minute / 10) * 10
+	keys := make([]string, param.minute-tenMinute+1)
+	for i := int64(0); i <= param.minute-tenMinute; i++ {
+		keys[i] = fmt.Sprintf("%s_%d.gz", param.exchange, tenMinute+i)
 	}
+	bodies := sc.S3GetAll(ctx, keys)
 	defer func() {
-		cerr := rows.Close()
-		if cerr != nil {
+		serr := bodies.Close()
+		if serr != nil {
 			if err != nil {
-				err = fmt.Errorf("%+v, orignal error was %+v", cerr, err)
+				err = fmt.Errorf("snapshot: bodies close: %v, originally: %v", serr, err)
 			} else {
-				err = cerr
+				err = serr
 			}
 		}
 	}()
 	var totalScanned int64
-	var key string
-	for rows.Next() {
-		err = rows.Scan(&key)
-		fmt.Printf("reading start for file %s : %d\n", key, time.Now().Sub(st))
-
-		if err != nil {
+	i := 0
+	for {
+		body, ok := bodies.Next()
+		if !ok {
+			break
+		}
+		if body == nil {
+			fmt.Printf("skipping file %s: did not exist: %d:\n", keys[i], time.Now().Sub(st))
+			continue
+		}
+		fmt.Printf("reading file %s : %d\n", keys[i], time.Now().Sub(st))
+		scanned, stop, serr := feed(body, param.nanosec, param.channels, sim)
+		totalScanned += int64(scanned)
+		if serr != nil {
+			err = serr
 			return
 		}
-		var scanned int64
-		var stop bool
-		scanned, stop, err = downloadAndFeed(key, nanosec, channels, sim)
-		if err != nil {
-			return
-		}
-		totalScanned += scanned
 		if stop {
 			// it is enough to make snapshot
 			break
 		}
+		i++
 	}
 	fmt.Printf("snapshot start : %d\n", time.Now().Sub(st))
-
 	// write snapshot
 	buf := make([]byte, 0, 10*1024*1024)
 	buffer := bytes.NewBuffer(buf)
@@ -153,7 +144,7 @@ func handleRequest(event events.APIGatewayProxyRequest) (response *events.APIGat
 		var out [][]byte
 		if form != nil {
 			// if formatter is specified, write formatted
-			out, err = form.Format(snapshot.Channel, snapshot.Snapshot)
+			out, err = form.FormatMessage(snapshot.Channel, snapshot.Snapshot)
 			if err != nil {
 				return
 			}
@@ -161,7 +152,7 @@ func handleRequest(event events.APIGatewayProxyRequest) (response *events.APIGat
 			out = [][]byte{snapshot.Snapshot}
 		}
 		for _, str := range out {
-			_, err = buffer.WriteString(fmt.Sprintf("%d\t%s\t", nanosec, snapshot.Channel))
+			_, err = buffer.WriteString(fmt.Sprintf("%d\t%s\t", param.nanosec, snapshot.Channel))
 			if err != nil {
 				return
 			}
@@ -175,9 +166,7 @@ func handleRequest(event events.APIGatewayProxyRequest) (response *events.APIGat
 			}
 		}
 	}
-
 	fmt.Printf("snapshot end : %d\n", time.Now().Sub(st))
-
 	result := buffer.Bytes()
 	var incremented int64
 	if apikey.Demo {
@@ -191,12 +180,44 @@ func handleRequest(event events.APIGatewayProxyRequest) (response *events.APIGat
 	fmt.Printf("increment transfer end : %d\n", time.Now().Sub(st))
 	// return result
 	var returnCode int
-	if totalScanned == 0 {
+	if len(result) == 0 {
 		returnCode = 404
 	} else {
 		returnCode = 200
 	}
 	return sc.MakeLargeResponse(returnCode, result, incremented)
+}
+
+func makeParameter(event events.APIGatewayProxyRequest) (param SnapshotParameter, err error) {
+	var ok bool
+	param.exchange, ok = event.PathParameters["exchange"]
+	if !ok {
+		err = errors.New("'exchange' must be specified")
+		return
+	}
+	nanosecStr, ok := event.PathParameters["nanosec"]
+	if !ok {
+		err = errors.New("'nanosec' must be specified")
+		return
+	}
+	var serr error
+	param.nanosec, serr = strconv.ParseInt(nanosecStr, 10, 64)
+	if serr != nil {
+		err = errors.New("'nanosec' must be of integer type")
+		return
+	}
+	param.minute = param.nanosec / 60 / 1000000000
+	param.channels, ok = event.MultiValueQueryStringParameters["channels"]
+	if !ok {
+		err = errors.New("'channels' must be specified")
+		return
+	}
+	param.format, ok = event.QueryStringParameters["format"]
+	if !ok {
+		// default format is raw
+		param.format = "raw"
+	}
+	return
 }
 
 func main() {
