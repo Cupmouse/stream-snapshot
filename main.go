@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -14,8 +13,6 @@ import (
 
 	"github.com/exchangedataset/streamcommons"
 	sc "github.com/exchangedataset/streamcommons"
-	"github.com/exchangedataset/streamcommons/formatter"
-	"github.com/exchangedataset/streamcommons/simulator"
 )
 
 // Production is `true` if and only if this instance is running on the context of production environment.
@@ -72,21 +69,6 @@ func handleRequest(event events.APIGatewayProxyRequest) (response *events.APIGat
 			return
 		}
 	}
-	var form formatter.Formatter
-	if param.format != "raw" {
-		// check if it has the right formatter for this exhcange and format
-		form, serr = formatter.GetFormatter(param.exchange, param.channels, param.format)
-		if serr != nil {
-			response = sc.MakeResponse(400, serr.Error())
-			return
-		}
-	}
-	// check if it has the right simulator for this request
-	sim, serr := simulator.GetSimulator(param.exchange, param.channels)
-	if serr != nil {
-		response = sc.MakeResponse(400, serr.Error())
-		return
-	}
 	fmt.Printf("setup end : %d\n", time.Now().Sub(st))
 	// list dataset to read to reconstruct snapshot
 	// and make response string
@@ -96,6 +78,7 @@ func handleRequest(event events.APIGatewayProxyRequest) (response *events.APIGat
 	for i := int64(0); i <= param.minute-tenMinute; i++ {
 		keys[i] = fmt.Sprintf("%s_%d.gz", param.exchange, tenMinute+i)
 	}
+	fmt.Printf("keys: %v\n", keys)
 	bodies := sc.S3GetAll(ctx, keys)
 	defer func() {
 		serr := bodies.Close()
@@ -107,72 +90,23 @@ func handleRequest(event events.APIGatewayProxyRequest) (response *events.APIGat
 			}
 		}
 	}()
-	var totalScanned int64
-	i := 0
-	for {
-		body, ok := bodies.Next()
-		if !ok {
-			break
-		}
-		if body == nil {
-			fmt.Printf("skipping file %s: did not exist: %d:\n", keys[i], time.Now().Sub(st))
-			continue
-		}
-		fmt.Printf("reading file %s : %d\n", keys[i], time.Now().Sub(st))
-		scanned, stop, serr := feed(body, param.nanosec, param.channels, sim)
-		totalScanned += int64(scanned)
-		if serr != nil {
-			err = serr
-			return
-		}
-		if stop {
-			// it is enough to make snapshot
-			break
-		}
-		i++
-	}
 	fmt.Printf("snapshot start : %d\n", time.Now().Sub(st))
 	// write snapshot
-	buf := make([]byte, 0, 10*1024*1024)
-	buffer := bytes.NewBuffer(buf)
-	var snapshots []simulator.Snapshot
-	snapshots, err = sim.TakeSnapshot()
-	if err != nil {
+	result, scanned, eerr, serr := snapshot(param, bodies)
+	if serr != nil {
+		err = fmt.Errorf("snapshot: %v", serr)
 		return
 	}
-	for _, snapshot := range snapshots {
-		var out [][]byte
-		if form != nil {
-			// if formatter is specified, write formatted
-			out, err = form.FormatMessage(snapshot.Channel, snapshot.Snapshot)
-			if err != nil {
-				return
-			}
-		} else {
-			out = [][]byte{snapshot.Snapshot}
-		}
-		for _, str := range out {
-			_, err = buffer.WriteString(fmt.Sprintf("%d\t%s\t", param.nanosec, snapshot.Channel))
-			if err != nil {
-				return
-			}
-			_, err = buffer.Write(str)
-			if err != nil {
-				return
-			}
-			_, err = buffer.WriteRune('\n')
-			if err != nil {
-				return
-			}
-		}
+	if eerr != nil {
+		response = sc.MakeResponse(400, eerr.Error())
+		return
 	}
 	fmt.Printf("snapshot end : %d\n", time.Now().Sub(st))
-	result := buffer.Bytes()
 	var incremented int64
 	if apikey.Demo {
-		incremented = streamcommons.CalcQuotaUsed(totalScanned)
+		incremented = streamcommons.CalcQuotaUsed(scanned)
 	} else {
-		incremented, err = apikey.IncrementUsed(db, totalScanned)
+		incremented, err = apikey.IncrementUsed(db, scanned)
 		if err != nil {
 			return
 		}

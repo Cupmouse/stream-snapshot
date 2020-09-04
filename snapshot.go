@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"compress/gzip"
 	"fmt"
 	"io"
@@ -9,6 +10,8 @@ import (
 	"time"
 	"unsafe"
 
+	"github.com/exchangedataset/streamcommons"
+	"github.com/exchangedataset/streamcommons/formatter"
 	"github.com/exchangedataset/streamcommons/simulator"
 )
 
@@ -21,7 +24,7 @@ type SnapshotParameter struct {
 	format   string
 }
 
-func feedToSimulator(reader *bufio.Reader, targetNanosec int64, sim simulator.Simulator) (scanned int, stop bool, err error) {
+func feedToSimulator(reader *bufio.Reader, targetNanosec int64, sim *simulator.Simulator, setNewSim func(*simulator.Simulator) error) (scanned int, stop bool, err error) {
 	tprocess := int64(0)
 	for {
 		// read type str
@@ -56,7 +59,7 @@ func feedToSimulator(reader *bufio.Reader, targetNanosec int64, sim simulator.Si
 			if err != nil {
 				return
 			}
-			if timestamp >= targetNanosec {
+			if timestamp > targetNanosec {
 				// lines after the target time is not needed to construct a snapshot
 				// unless it is not a state line
 				// state lines should be considered when the target time is before status lines
@@ -84,9 +87,9 @@ func feedToSimulator(reader *bufio.Reader, targetNanosec int64, sim simulator.Si
 			scanned += len(line)
 			st := time.Now()
 			if typeStr == "msg\t" {
-				err = sim.ProcessMessageChannelKnown(channelTrimmed, line)
+				err = (*sim).ProcessMessageChannelKnown(channelTrimmed, line)
 			} else if typeStr == "state\t" {
-				err = sim.ProcessState(channelTrimmed, line)
+				err = (*sim).ProcessState(channelTrimmed, line)
 			}
 			tprocess += time.Now().Sub(st).Nanoseconds()
 			if err != nil {
@@ -99,8 +102,12 @@ func feedToSimulator(reader *bufio.Reader, targetNanosec int64, sim simulator.Si
 				return 0, false, serr
 			}
 			scanned += len(url)
+			err = setNewSim(sim)
+			if err != nil {
+				return
+			}
 			st := time.Now()
-			err = sim.ProcessStart(url)
+			err = (*sim).ProcessStart(url)
 			tprocess += time.Now().Sub(st).Nanoseconds()
 			if err != nil {
 				return
@@ -120,7 +127,7 @@ func feedToSimulator(reader *bufio.Reader, targetNanosec int64, sim simulator.Si
 	return
 }
 
-func feed(reader io.ReadCloser, targetNanosec int64, channels []string, sim simulator.Simulator) (scanned int, stop bool, err error) {
+func feed(reader io.ReadCloser, targetNanosec int64, channels []string, sim *simulator.Simulator, setNewSim func(*simulator.Simulator) error) (scanned int, stop bool, err error) {
 	defer func() {
 		serr := reader.Close()
 		if serr != nil {
@@ -150,6 +157,92 @@ func feed(reader io.ReadCloser, targetNanosec int64, channels []string, sim simu
 		}
 	}()
 	breader := bufio.NewReader(greader)
-	scanned, stop, err = feedToSimulator(breader, targetNanosec, sim)
+	scanned, stop, err = feedToSimulator(breader, targetNanosec, sim, setNewSim)
+	return
+}
+
+func snapshot(param SnapshotParameter, bodies *streamcommons.S3GetConcurrent) (ret []byte, totalScanned int64, externalErr error, err error) {
+	st := time.Now()
+	// check if it has the right simulator for this request
+	setNewSim := func(simp *simulator.Simulator) error {
+		sim, serr := simulator.GetSimulator(param.exchange, param.channels)
+		if serr != nil {
+			return serr
+		}
+		*simp = sim
+		return nil
+	}
+	sim := new(simulator.Simulator)
+	serr := setNewSim(sim)
+	if serr != nil {
+		externalErr = serr
+		return
+	}
+	var form formatter.Formatter
+	if param.format != "raw" {
+		// check if it has the right formatter for this exhcange and format
+		form, serr = formatter.GetFormatter(param.exchange, param.channels, param.format)
+		if serr != nil {
+			externalErr = serr
+			return
+		}
+	}
+	i := 0
+	for {
+		body, ok := bodies.Next()
+		if !ok {
+			break
+		}
+		if body == nil {
+			fmt.Printf("skipping file %d: did not exist\n", i)
+			continue
+		}
+		fmt.Printf("reading file %d : %d\n", i, time.Now().Sub(st))
+		scanned, stop, serr := feed(body, param.nanosec, param.channels, sim, setNewSim)
+		totalScanned += int64(scanned)
+		if serr != nil {
+			err = serr
+			return
+		}
+		if stop {
+			// it is enough to make snapshot
+			break
+		}
+		i++
+	}
+	buf := make([]byte, 0, 10*1024*1024)
+	buffer := bytes.NewBuffer(buf)
+	var snapshots []simulator.Snapshot
+	snapshots, err = (*sim).TakeSnapshot()
+	if err != nil {
+		return
+	}
+	for _, snapshot := range snapshots {
+		var out [][]byte
+		if form != nil {
+			// if formatter is specified, write formatted
+			out, err = form.FormatMessage(snapshot.Channel, snapshot.Snapshot)
+			if err != nil {
+				return
+			}
+		} else {
+			out = [][]byte{snapshot.Snapshot}
+		}
+		for _, str := range out {
+			_, err = buffer.WriteString(fmt.Sprintf("%d\t%s\t", param.nanosec, snapshot.Channel))
+			if err != nil {
+				return
+			}
+			_, err = buffer.Write(str)
+			if err != nil {
+				return
+			}
+			_, err = buffer.WriteRune('\n')
+			if err != nil {
+				return
+			}
+		}
+	}
+	ret = buffer.Bytes()
 	return
 }
