@@ -212,33 +212,58 @@ func snapshot(param SnapshotParameter, bodies *streamcommons.S3GetConcurrent) (r
 	}
 	buf := make([]byte, 0, 10*1024*1024)
 	buffer := bytes.NewBuffer(buf)
-	var snapshots []simulator.Snapshot
-	snapshots, err = (*sim).TakeSnapshot()
-	if err != nil {
+	snapshots, serr := (*sim).TakeSnapshot()
+	if serr != nil {
+		err = serr
 		return
 	}
 	for _, snapshot := range snapshots {
-		var out [][]byte
 		if form != nil {
 			// if formatter is specified, write formatted
-			out, err = form.FormatMessage(snapshot.Channel, snapshot.Snapshot)
-			if err != nil {
+			formatted, serr := form.FormatMessage(snapshot.Channel, snapshot.Snapshot)
+			if serr != nil {
+				err = serr
 				return
+			}
+			for _, f := range formatted {
+				nanosecStr := strconv.FormatInt(param.nanosec, 10)
+				if _, err = buffer.WriteString(nanosecStr); err != nil {
+					return
+				}
+				if _, err = buffer.WriteRune('\t'); err != nil {
+					return
+				}
+				if _, err = buffer.WriteString(f.Channel); err != nil {
+					return
+				}
+				if _, err = buffer.WriteRune('\t'); err != nil {
+					return
+				}
+				if _, err = buffer.Write(f.Message); err != nil {
+					return
+				}
+				if _, err = buffer.WriteRune('\n'); err != nil {
+					return
+				}
 			}
 		} else {
-			out = [][]byte{snapshot.Snapshot}
-		}
-		for _, str := range out {
-			_, err = buffer.WriteString(fmt.Sprintf("%d\t%s\t", param.nanosec, snapshot.Channel))
-			if err != nil {
+			nanosecStr := strconv.FormatInt(param.nanosec, 10)
+			if _, err = buffer.WriteString(nanosecStr); err != nil {
 				return
 			}
-			_, err = buffer.Write(str)
-			if err != nil {
+			if _, err = buffer.WriteRune('\t'); err != nil {
 				return
 			}
-			_, err = buffer.WriteRune('\n')
-			if err != nil {
+			if _, err = buffer.WriteString(snapshot.Channel); err != nil {
+				return
+			}
+			if _, err = buffer.WriteRune('\t'); err != nil {
+				return
+			}
+			if _, err = buffer.Write(snapshot.Snapshot); err != nil {
+				return
+			}
+			if _, err = buffer.WriteRune('\n'); err != nil {
 				return
 			}
 		}
