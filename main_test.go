@@ -38,7 +38,7 @@ func testCommon(t *testing.T, res *events.APIGatewayProxyResponse, err error) {
 }
 
 func TestBitmexOrderBookL2(t *testing.T) {
-	res, err := handleRequest(makeLambdaEvent("bitmex", []string{"orderBookL2"}, []string{"orderBookL2_XBTUSD"}, "1598941025555000000", "json"))
+	res, err := handleRequest(makeLambdaEvent("bitmex", []string{"orderBookL2_test"}, nil, "1598941025555000000", "json"))
 	testCommon(t, res, err)
 }
 

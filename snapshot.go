@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"compress/gzip"
+	"context"
 	"fmt"
 	"io"
 	"strconv"
@@ -11,21 +12,9 @@ import (
 	"unsafe"
 
 	"github.com/exchangedataset/streamcommons"
-	"github.com/exchangedataset/streamcommons/formatter"
-	"github.com/exchangedataset/streamcommons/simulator"
 )
 
-// SnapshotParameter is the parameter for snapshot
-type SnapshotParameter struct {
-	exchange   string
-	nanosec    int64
-	minute     int64
-	channels   []string
-	format     string
-	postFilter map[string]bool
-}
-
-func feedToSimulator(reader *bufio.Reader, targetNanosec int64, sim *simulator.Simulator, setNewSim func(*simulator.Simulator) error) (scanned int, stop bool, err error) {
+func feedToSimulator(reader *bufio.Reader, c *SnapshotContext) (scanned int, stop bool, err error) {
 	tprocess := int64(0)
 	for {
 		// read type str
@@ -60,7 +49,7 @@ func feedToSimulator(reader *bufio.Reader, targetNanosec int64, sim *simulator.S
 			if err != nil {
 				return
 			}
-			if timestamp > targetNanosec {
+			if timestamp > c.nanosec {
 				// lines after the target time is not needed to construct a snapshot
 				// unless it is not a state line
 				// state lines should be considered when the target time is before status lines
@@ -88,9 +77,9 @@ func feedToSimulator(reader *bufio.Reader, targetNanosec int64, sim *simulator.S
 			scanned += len(line)
 			st := time.Now()
 			if typeStr == "msg\t" {
-				err = (*sim).ProcessMessageChannelKnown(channelTrimmed, line)
+				err = c.sim.ProcessMessageChannelKnown(channelTrimmed, line)
 			} else if typeStr == "state\t" {
-				err = (*sim).ProcessState(channelTrimmed, line)
+				err = c.sim.ProcessState(channelTrimmed, line)
 			}
 			tprocess += time.Now().Sub(st).Nanoseconds()
 			if err != nil {
@@ -103,12 +92,12 @@ func feedToSimulator(reader *bufio.Reader, targetNanosec int64, sim *simulator.S
 				return 0, false, serr
 			}
 			scanned += len(url)
-			err = setNewSim(sim)
+			err = c.setNewSimulator()
 			if err != nil {
 				return
 			}
 			st := time.Now()
-			err = (*sim).ProcessStart(url)
+			err = c.sim.ProcessStart(url)
 			tprocess += time.Now().Sub(st).Nanoseconds()
 			if err != nil {
 				return
@@ -128,7 +117,7 @@ func feedToSimulator(reader *bufio.Reader, targetNanosec int64, sim *simulator.S
 	return
 }
 
-func feed(reader io.ReadCloser, targetNanosec int64, channels []string, sim *simulator.Simulator, setNewSim func(*simulator.Simulator) error) (scanned int, stop bool, err error) {
+func prepareReaderAndFeed(reader io.ReadCloser, c *SnapshotContext) (scanned int, stop bool, err error) {
 	defer func() {
 		serr := reader.Close()
 		if serr != nil {
@@ -158,36 +147,34 @@ func feed(reader io.ReadCloser, targetNanosec int64, channels []string, sim *sim
 		}
 	}()
 	breader := bufio.NewReader(greader)
-	scanned, stop, err = feedToSimulator(breader, targetNanosec, sim, setNewSim)
+	scanned, stop, err = feedToSimulator(breader, c)
 	return
 }
 
-func snapshot(param SnapshotParameter, bodies *streamcommons.S3GetConcurrent) (ret []byte, totalScanned int64, externalErr error, err error) {
+func snapshot(c *SnapshotContext) (ret []byte, totalScanned int64, err error) {
 	st := time.Now()
-	// check if it has the right simulator for this request
-	setNewSim := func(simp *simulator.Simulator) error {
-		sim, serr := simulator.GetSimulator(param.exchange, param.channels)
+
+	// list dataset to read to reconstruct snapshot
+	// and make response string
+	ctx := context.Background()
+	tenMinute := (c.minute / 10) * 10
+	keys := make([]string, c.minute-tenMinute+1)
+	for i := int64(0); i <= c.minute-tenMinute; i++ {
+		keys[i] = fmt.Sprintf("%s_%d.gz", c.exchange, tenMinute+i)
+	}
+	fmt.Printf("keys: %v\n", keys)
+	bodies := streamcommons.S3GetAll(ctx, keys)
+	defer func() {
+		serr := bodies.Close()
 		if serr != nil {
-			return serr
+			if err != nil {
+				err = fmt.Errorf("snapshot: bodies close: %v, originally: %v", serr, err)
+			} else {
+				err = fmt.Errorf("snapshot: bodies close: %v", serr)
+			}
 		}
-		*simp = sim
-		return nil
-	}
-	sim := new(simulator.Simulator)
-	serr := setNewSim(sim)
-	if serr != nil {
-		externalErr = serr
-		return
-	}
-	var form formatter.Formatter
-	if param.format != "raw" {
-		// check if it has the right formatter for this exhcange and format
-		form, serr = formatter.GetFormatter(param.exchange, param.channels, param.format)
-		if serr != nil {
-			externalErr = serr
-			return
-		}
-	}
+	}()
+
 	i := 0
 	for {
 		body, ok := bodies.Next()
@@ -199,7 +186,7 @@ func snapshot(param SnapshotParameter, bodies *streamcommons.S3GetConcurrent) (r
 			continue
 		}
 		fmt.Printf("reading file %d : %d\n", i, time.Now().Sub(st))
-		scanned, stop, serr := feed(body, param.nanosec, param.channels, sim, setNewSim)
+		scanned, stop, serr := prepareReaderAndFeed(body, c)
 		totalScanned += int64(scanned)
 		if serr != nil {
 			err = serr
@@ -213,24 +200,21 @@ func snapshot(param SnapshotParameter, bodies *streamcommons.S3GetConcurrent) (r
 	}
 	buf := make([]byte, 0, 10*1024*1024)
 	buffer := bytes.NewBuffer(buf)
-	snapshots, serr := (*sim).TakeSnapshot()
+	snapshots, serr := c.sim.TakeSnapshot()
 	if serr != nil {
 		err = serr
 		return
 	}
 	for _, snapshot := range snapshots {
-		if form != nil {
+		if c.form != nil {
 			// if formatter is specified, write formatted
-			formatted, serr := form.FormatMessage(snapshot.Channel, snapshot.Snapshot)
+			formatted, serr := c.form.FormatMessage(snapshot.Channel, snapshot.Snapshot)
 			if serr != nil {
 				err = serr
 				return
 			}
 			for _, f := range formatted {
-				if _, ok := param.postFilter[f.Channel]; !ok {
-					continue
-				}
-				nanosecStr := strconv.FormatInt(param.nanosec, 10)
+				nanosecStr := strconv.FormatInt(c.nanosec, 10)
 				if _, err = buffer.WriteString(nanosecStr); err != nil {
 					return
 				}
@@ -251,7 +235,7 @@ func snapshot(param SnapshotParameter, bodies *streamcommons.S3GetConcurrent) (r
 				}
 			}
 		} else {
-			nanosecStr := strconv.FormatInt(param.nanosec, 10)
+			nanosecStr := strconv.FormatInt(c.nanosec, 10)
 			if _, err = buffer.WriteString(nanosecStr); err != nil {
 				return
 			}
