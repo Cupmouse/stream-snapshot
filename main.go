@@ -151,6 +151,13 @@ func makeParameter(event events.APIGatewayProxyRequest) (param SnapshotParameter
 		// default format is raw
 		param.format = "raw"
 	}
+	postFilter, ok := event.MultiValueQueryStringParameters["postFilter"]
+	if ok {
+		param.postFilter = make(map[string]bool)
+		for _, ch := range postFilter {
+			param.postFilter[ch] = true
+		}
+	}
 	return
 }
 

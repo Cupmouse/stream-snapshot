@@ -17,11 +17,12 @@ import (
 
 // SnapshotParameter is the parameter for snapshot
 type SnapshotParameter struct {
-	exchange string
-	nanosec  int64
-	minute   int64
-	channels []string
-	format   string
+	exchange   string
+	nanosec    int64
+	minute     int64
+	channels   []string
+	format     string
+	postFilter map[string]bool
 }
 
 func feedToSimulator(reader *bufio.Reader, targetNanosec int64, sim *simulator.Simulator, setNewSim func(*simulator.Simulator) error) (scanned int, stop bool, err error) {
@@ -226,6 +227,9 @@ func snapshot(param SnapshotParameter, bodies *streamcommons.S3GetConcurrent) (r
 				return
 			}
 			for _, f := range formatted {
+				if _, ok := param.postFilter[f.Channel]; !ok {
+					continue
+				}
 				nanosecStr := strconv.FormatInt(param.nanosec, 10)
 				if _, err = buffer.WriteString(nanosecStr); err != nil {
 					return
