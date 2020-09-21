@@ -7,7 +7,7 @@ import (
 	"github.com/aws/aws-lambda-go/events"
 )
 
-func makeLambdaEvent(exchange string, channels []string, postFilter []string, nanosec string, format string) events.APIGatewayProxyRequest {
+func makeLambdaEvent(exchange string, channels []string, nanosec string, format string) events.APIGatewayProxyRequest {
 	return events.APIGatewayProxyRequest{
 		PathParameters: map[string]string{
 			"exchange": exchange,
@@ -17,8 +17,7 @@ func makeLambdaEvent(exchange string, channels []string, postFilter []string, na
 			"format": format,
 		},
 		MultiValueQueryStringParameters: map[string][]string{
-			"channels":   channels,
-			"postFilter": postFilter,
+			"channels": channels,
 		},
 		Headers: map[string]string{"Authorization": "Bearer demo"},
 	}
@@ -38,36 +37,36 @@ func testCommon(t *testing.T, res *events.APIGatewayProxyResponse, err error) {
 }
 
 func TestBitmexOrderBookL2(t *testing.T) {
-	res, err := handleRequest(makeLambdaEvent("bitmex", []string{"orderBookL2_test"}, nil, "1598941025555000000", "json"))
+	res, err := handleRequest(makeLambdaEvent("bitmex", []string{"orderBookL2_XBTUSD", "orderBookL2_thisdoesnotexist", "orderBookL2"}, "1598941025555000000", "json"))
 	testCommon(t, res, err)
 }
 
 func TestBitfinexBook(t *testing.T) {
-	res, err := handleRequest(makeLambdaEvent("bitfinex", []string{"book_tBTCUSD"}, nil, "1598941025555000000", "json"))
+	res, err := handleRequest(makeLambdaEvent("bitfinex", []string{"book_tBTCUSD"}, "1598941025555000000", "json"))
 	testCommon(t, res, err)
 }
 
 func TestBinanceDepth(t *testing.T) {
-	res, err := handleRequest(makeLambdaEvent("binance", []string{"btcusdt@depth@100ms"}, nil, "1598941025555000000", "json"))
+	res, err := handleRequest(makeLambdaEvent("binance", []string{"btcusdt@depth@100ms"}, "1598941025555000000", "json"))
 	testCommon(t, res, err)
 }
 
 func TestBinanceDepthRest(t *testing.T) {
-	res, err := handleRequest(makeLambdaEvent("binance", []string{"btcusdt@rest_depth"}, nil, "1598941025555000000", "json"))
+	res, err := handleRequest(makeLambdaEvent("binance", []string{"btcusdt@rest_depth"}, "1598941025555000000", "json"))
 	testCommon(t, res, err)
 }
 
 func TestBitflyerLightningBoard(t *testing.T) {
-	res, err := handleRequest(makeLambdaEvent("bitflyer", []string{"lightning_board_BTC_JPY"}, nil, "1598941025555000000", "json"))
+	res, err := handleRequest(makeLambdaEvent("bitflyer", []string{"lightning_board_BTC_JPY"}, "1598941025555000000", "json"))
 	testCommon(t, res, err)
 }
 
 func TestBitflyerLightningSnapshot(t *testing.T) {
-	res, err := handleRequest(makeLambdaEvent("bitflyer", []string{"lightning_board_snapshot_BTC_JPY"}, nil, "1598941025555000000", "json"))
+	res, err := handleRequest(makeLambdaEvent("bitflyer", []string{"lightning_board_snapshot_BTC_JPY"}, "1598941025555000000", "json"))
 	testCommon(t, res, err)
 }
 
 func TestLiquidPriceLaddersCashBTCJPY(t *testing.T) {
-	res, err := handleRequest(makeLambdaEvent("liquid", []string{"price_ladders_cash_btcjpy_buy"}, nil, "1598941025555000000", "json"))
+	res, err := handleRequest(makeLambdaEvent("liquid", []string{"price_ladders_cash_btcjpy_buy"}, "1598941025555000000", "json"))
 	testCommon(t, res, err)
 }

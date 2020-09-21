@@ -151,7 +151,7 @@ func prepareReaderAndFeed(reader io.ReadCloser, c *SnapshotContext) (scanned int
 	return
 }
 
-func snapshot(c *SnapshotContext) (ret []byte, totalScanned int64, err error) {
+func snapshot(c *SnapshotContext) (ret []byte, totalScanned int, err error) {
 	st := time.Now()
 
 	// list dataset to read to reconstruct snapshot
@@ -187,7 +187,7 @@ func snapshot(c *SnapshotContext) (ret []byte, totalScanned int64, err error) {
 		}
 		fmt.Printf("reading file %d : %d\n", i, time.Now().Sub(st))
 		scanned, stop, serr := prepareReaderAndFeed(body, c)
-		totalScanned += int64(scanned)
+		totalScanned += scanned
 		if serr != nil {
 			err = serr
 			return

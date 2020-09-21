@@ -75,11 +75,9 @@ func handleRequest(event events.APIGatewayProxyRequest) (response *events.APIGat
 		return
 	}
 	fmt.Printf("snapshot end : %d\n", time.Now().Sub(st))
-	var incremented int64
-	if apikey.Demo {
-		incremented = streamcommons.CalcQuotaUsed(scanned)
-	} else {
-		incremented, err = apikey.IncrementUsed(db, scanned)
+	cost := streamcommons.CalcCost(scanned, 0)
+	if !apikey.Demo {
+		err = apikey.IncrementUsed(db, cost)
 		if err != nil {
 			return
 		}
@@ -92,7 +90,7 @@ func handleRequest(event events.APIGatewayProxyRequest) (response *events.APIGat
 	} else {
 		returnCode = 200
 	}
-	return sc.MakeLargeResponse(returnCode, result, incremented)
+	return sc.MakeLargeResponse(returnCode, result, cost)
 }
 
 func main() {
